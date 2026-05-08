@@ -33,6 +33,18 @@ on:
         required: true
         default: |
           luci-app-passwall
+          chinadns-ng
+          dns2socks
+          tcping
+        type: string
+      required_packages:
+        description: Имена пакетов, которые обязаны присутствовать в опубликованном feed
+        required: true
+        default: |
+          luci-app-passwall
+          chinadns-ng
+          dns2socks
+          tcping
         type: string
       publish_feed:
         description: Публиковать собранный feed в gh-pages
@@ -132,6 +144,42 @@ jobs:
           \) -exec cp {} "$GITHUB_WORKSPACE/out/openwrt-feed/" \;
           find "$GITHUB_WORKSPACE/out/openwrt-feed" -maxdepth 1 -type f | sort
 
+      - name: Generate apk repository index
+        working-directory: ${{ runner.temp }}/openwrt-sdk
+        run: |
+          set -euo pipefail
+          apk_tool="$(find "$PWD/staging_dir" -type f -name apk -perm -111 | head -n1 || true)"
+          if [[ -z "$apk_tool" ]]; then
+            echo "Не найден host apk tool для генерации packages.adb" >&2
+            exit 65
+          fi
+          mapfile -t apk_files < <(find "$GITHUB_WORKSPACE/out/openwrt-feed" -maxdepth 1 -type f -name '*.apk' | sort)
+          if [[ ${#apk_files[@]} -eq 0 ]]; then
+            echo "В out/openwrt-feed нет .apk файлов для индексации" >&2
+            exit 66
+          fi
+          "$apk_tool" mkndx --output "$GITHUB_WORKSPACE/out/openwrt-feed/packages.adb" "${apk_files[@]}"
+          test -s "$GITHUB_WORKSPACE/out/openwrt-feed/packages.adb"
+
+      - name: Validate feed artifacts
+        env:
+          REQUIRED_PACKAGES: ${{ github.event.inputs.required_packages }}
+        run: |
+          set -euo pipefail
+          test -s "$GITHUB_WORKSPACE/out/openwrt-feed/packages.adb"
+          mapfile -t required_packages < <(printf '%s\n' "$REQUIRED_PACKAGES" | tr ' ' '\n' | sed '/^$/d')
+          if [[ ${#required_packages[@]} -eq 0 ]]; then
+            echo "Нужно передать хотя бы один обязательный пакет для валидации feed" >&2
+            exit 67
+          fi
+          for package_name in "${required_packages[@]}"; do
+            if ! find "$GITHUB_WORKSPACE/out/openwrt-feed" -maxdepth 1 -type f -name "${package_name}-*.apk" | grep -q .; then
+              echo "В feed отсутствует обязательный пакет: ${package_name}" >&2
+              exit 68
+            fi
+          done
+          find "$GITHUB_WORKSPACE/out/openwrt-feed" -maxdepth 1 -type f | sort
+
       - name: Pack feed archive
         id: pack_feed
         run: |
@@ -198,6 +246,8 @@ jobs:
             --arg url "$feed_url" \
             '{release:$release,target:$target,subtarget:$subtarget,repository:$repo,url:$url}' \
             > "$publish_dir/feed.json"
+
+          test -s "$publish_dir/packages.adb"
 
           cd "$publish_repo"
           git config user.name 'github-actions[bot]'
