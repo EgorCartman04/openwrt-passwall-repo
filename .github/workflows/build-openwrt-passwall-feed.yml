@@ -175,7 +175,12 @@ jobs:
             echo "В out/openwrt-feed нет .apk файлов для подписи" >&2
             exit 71
           fi
-          "$apk_tool" --sign-key "$signing_key_file" adbsign --reset-signatures "${apk_files[@]}"
+          sign_output="$($apk_tool --allow-untrusted --sign-key "$signing_key_file" adbsign --reset-signatures "${apk_files[@]}" 2>&1)"
+          printf '%s\n' "$sign_output"
+          if printf '%s\n' "$sign_output" | grep -Eq '(^| )ERROR:|UNTRUSTED signature'; then
+            echo "Переподпись .apk пакетов завершилась с ошибками" >&2
+            exit 72
+          fi
 
       - name: Generate apk repository index
         working-directory: ${{ runner.temp }}/openwrt-sdk
@@ -206,7 +211,12 @@ jobs:
             exit 72
           fi
           test -s "$index_file"
-          "$apk_tool" --sign-key "$signing_key_file" adbsign --reset-signatures "$index_file"
+          sign_output="$($apk_tool --allow-untrusted --sign-key "$signing_key_file" adbsign --reset-signatures "$index_file" 2>&1)"
+          printf '%s\n' "$sign_output"
+          if printf '%s\n' "$sign_output" | grep -Eq '(^| )ERROR:|UNTRUSTED signature'; then
+            echo "Подпись packages.adb завершилась с ошибками" >&2
+            exit 73
+          fi
           test -s "$index_file"
 
       - name: Validate feed artifacts
