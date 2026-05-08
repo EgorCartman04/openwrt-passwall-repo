@@ -56,7 +56,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install SDK build dependencies
         run: |
@@ -140,7 +140,7 @@ jobs:
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
 
       - name: Upload feed artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openwrt-passwall-feed-${{ github.event.inputs.openwrt_release }}-${{ github.event.inputs.target }}-${{ github.event.inputs.subtarget }}
           path: |
