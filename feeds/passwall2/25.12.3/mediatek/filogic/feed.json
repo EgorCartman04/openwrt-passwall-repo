@@ -3,5 +3,6 @@
   "target": "mediatek",
   "subtarget": "filogic",
   "repository": "EgorCartman04/openwrt-passwall-repo",
-  "url": "https://EgorCartman04.github.io/openwrt-passwall-repo/feeds/passwall2/25.12.3/mediatek/filogic/"
+  "url": "https://EgorCartman04.github.io/openwrt-passwall-repo/feeds/passwall2/25.12.3/mediatek/filogic/",
+  "public_key_url": "https://EgorCartman04.github.io/openwrt-passwall-repo/feeds/passwall2/25.12.3/mediatek/filogic/passwall2-feed.pem"
 }
