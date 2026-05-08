@@ -58,7 +58,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install ImageBuilder dependencies
         run: |
@@ -161,7 +161,7 @@ jobs:
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
 
       - name: Upload sysupgrade artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openwrt-sysupgrade-${{ github.event.inputs.openwrt_release }}-${{ steps.resolve_profile.outputs.profile }}
           path: |
