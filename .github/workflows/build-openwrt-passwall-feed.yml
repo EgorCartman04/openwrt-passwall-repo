@@ -144,6 +144,39 @@ jobs:
           \) -exec cp {} "$GITHUB_WORKSPACE/out/openwrt-feed/" \;
           find "$GITHUB_WORKSPACE/out/openwrt-feed" -maxdepth 1 -type f | sort
 
+      - name: Prepare persistent signing key material
+        env:
+          APK_SIGNING_PRIVATE_KEY: ${{ secrets.APK_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APK_SIGNING_PRIVATE_KEY:-}" ]]; then
+            echo "Не задан secret APK_SIGNING_PRIVATE_KEY" >&2
+            exit 69
+          fi
+          signing_key_file="$RUNNER_TEMP/passwall2-feed.key"
+          printf '%s\n' "$APK_SIGNING_PRIVATE_KEY" > "$signing_key_file"
+          chmod 600 "$signing_key_file"
+          openssl pkey -in "$signing_key_file" -pubout -out "$GITHUB_WORKSPACE/out/openwrt-feed/passwall2-feed.pem"
+          test -s "$signing_key_file"
+          test -s "$GITHUB_WORKSPACE/out/openwrt-feed/passwall2-feed.pem"
+
+      - name: Re-sign built apk packages with persistent feed key
+        working-directory: ${{ runner.temp }}/openwrt-sdk
+        run: |
+          set -euo pipefail
+          apk_tool="$(find "$PWD/staging_dir" -type f -name apk -perm -111 | head -n1 || true)"
+          signing_key_file="$RUNNER_TEMP/passwall2-feed.key"
+          if [[ -z "$apk_tool" ]]; then
+            echo "Не найден host apk tool для подписи .apk пакетов" >&2
+            exit 70
+          fi
+          mapfile -t apk_files < <(find "$GITHUB_WORKSPACE/out/openwrt-feed" -maxdepth 1 -type f -name '*.apk' | sort)
+          if [[ ${#apk_files[@]} -eq 0 ]]; then
+            echo "В out/openwrt-feed нет .apk файлов для подписи" >&2
+            exit 71
+          fi
+          "$apk_tool" --sign-key "$signing_key_file" adbsign --reset-signatures "${apk_files[@]}"
+
       - name: Generate apk repository index
         working-directory: ${{ runner.temp }}/openwrt-sdk
         run: |
@@ -161,12 +194,28 @@ jobs:
           "$apk_tool" --allow-untrusted mkndx --output "$GITHUB_WORKSPACE/out/openwrt-feed/packages.adb" "${apk_files[@]}"
           test -s "$GITHUB_WORKSPACE/out/openwrt-feed/packages.adb"
 
+      - name: Sign apk repository index with persistent feed key
+        working-directory: ${{ runner.temp }}/openwrt-sdk
+        run: |
+          set -euo pipefail
+          apk_tool="$(find "$PWD/staging_dir" -type f -name apk -perm -111 | head -n1 || true)"
+          signing_key_file="$RUNNER_TEMP/passwall2-feed.key"
+          index_file="$GITHUB_WORKSPACE/out/openwrt-feed/packages.adb"
+          if [[ -z "$apk_tool" ]]; then
+            echo "Не найден host apk tool для подписи packages.adb" >&2
+            exit 72
+          fi
+          test -s "$index_file"
+          "$apk_tool" --sign-key "$signing_key_file" adbsign --reset-signatures "$index_file"
+          test -s "$index_file"
+
       - name: Validate feed artifacts
         env:
           REQUIRED_PACKAGES: ${{ github.event.inputs.required_packages }}
         run: |
           set -euo pipefail
           test -s "$GITHUB_WORKSPACE/out/openwrt-feed/packages.adb"
+          test -s "$GITHUB_WORKSPACE/out/openwrt-feed/passwall2-feed.pem"
           mapfile -t required_packages < <(printf '%s\n' "$REQUIRED_PACKAGES" | tr ' ' '\n' | sed '/^$/d')
           if [[ ${#required_packages[@]} -eq 0 ]]; then
             echo "Нужно передать хотя бы один обязательный пакет для валидации feed" >&2
@@ -244,10 +293,12 @@ jobs:
             --arg subtarget "$OPENWRT_SUBTARGET" \
             --arg repo "$GITHUB_REPOSITORY" \
             --arg url "$feed_url" \
-            '{release:$release,target:$target,subtarget:$subtarget,repository:$repo,url:$url}' \
+            --arg public_key_url "${feed_url}passwall2-feed.pem" \
+            '{release:$release,target:$target,subtarget:$subtarget,repository:$repo,url:$url,public_key_url:$public_key_url}' \
             > "$publish_dir/feed.json"
 
           test -s "$publish_dir/packages.adb"
+          test -s "$publish_dir/passwall2-feed.pem"
 
           cd "$publish_repo"
           git config user.name 'github-actions[bot]'
