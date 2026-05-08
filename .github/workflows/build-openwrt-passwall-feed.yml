@@ -1,0 +1,212 @@
+name: Build OpenWrt Passwall Feed
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_release:
+        description: Релиз OpenWrt
+        required: true
+        default: 25.12.3
+        type: string
+      target:
+        description: target OpenWrt
+        required: true
+        default: mediatek
+        type: string
+      subtarget:
+        description: subtarget OpenWrt
+        required: true
+        default: filogic
+        type: string
+      passwall_ref:
+        description: Git ref для openwrt-passwall
+        required: true
+        default: main
+        type: string
+      passwall_packages_ref:
+        description: Git ref для openwrt-passwall-packages
+        required: true
+        default: main
+        type: string
+      package_dirs:
+        description: Список package dir для сборки через SDK, через пробел или перевод строки
+        required: true
+        default: |
+          luci-app-passwall
+        type: string
+      publish_feed:
+        description: Публиковать собранный feed в gh-pages
+        required: true
+        default: true
+        type: boolean
+      publish_root:
+        description: Корневой путь feed внутри gh-pages
+        required: true
+        default: feeds/passwall2
+        type: string
+
+concurrency:
+  group: build-openwrt-passwall-feed-${{ github.ref_name }}-${{ github.event.inputs.openwrt_release }}
+  cancel-in-progress: false
+
+jobs:
+  build-passwall-feed:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install SDK build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk gcc-multilib gettext git \
+            libncurses-dev libssl-dev rsync unzip zlib1g-dev \
+            file wget curl ca-certificates zstd jq
+
+      - name: Make helper scripts executable
+        run: chmod +x ./scripts/openwrt-resolve-artifact.sh
+
+      - name: Resolve OpenWrt SDK download URL
+        id: resolve_sdk
+        run: |
+          sdk_url="$(./scripts/openwrt-resolve-artifact.sh \
+            "${{ github.event.inputs.openwrt_release }}" \
+            "${{ github.event.inputs.target }}" \
+            "${{ github.event.inputs.subtarget }}" \
+            sdk)"
+          echo "sdk_url=$sdk_url" >> "$GITHUB_OUTPUT"
+
+      - name: Download and extract OpenWrt SDK
+        run: |
+          mkdir -p "$RUNNER_TEMP/openwrt-sdk"
+          curl -fsSL "${{ steps.resolve_sdk.outputs.sdk_url }}" -o "$RUNNER_TEMP/openwrt-sdk/sdk.tar"
+          tar -xf "$RUNNER_TEMP/openwrt-sdk/sdk.tar" --strip-components=1 -C "$RUNNER_TEMP/openwrt-sdk"
+
+      - name: Inject Passwall sources into SDK tree
+        run: |
+          rm -rf "$RUNNER_TEMP/openwrt-sdk/package/openwrt-passwall" "$RUNNER_TEMP/openwrt-sdk/package/openwrt-passwall-packages"
+          git clone --depth=1 --branch "${{ github.event.inputs.passwall_ref }}" \
+            https://github.com/OpenWrt-Passwall/openwrt-passwall.git \
+            "$RUNNER_TEMP/openwrt-sdk/package/openwrt-passwall"
+          git clone --depth=1 --branch "${{ github.event.inputs.passwall_packages_ref }}" \
+            https://github.com/OpenWrt-Passwall/openwrt-passwall-packages.git \
+            "$RUNNER_TEMP/openwrt-sdk/package/openwrt-passwall-packages"
+
+      - name: Update feeds and prepare SDK config
+        working-directory: ${{ runner.temp }}/openwrt-sdk
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          make defconfig
+
+      - name: Build selected package dirs
+        working-directory: ${{ runner.temp }}/openwrt-sdk
+        env:
+          PACKAGE_DIRS: ${{ github.event.inputs.package_dirs }}
+        run: |
+          set -euo pipefail
+          mapfile -t package_dirs < <(printf '%s\n' "$PACKAGE_DIRS" | tr ' ' '\n' | sed '/^$/d')
+          if [[ ${#package_dirs[@]} -eq 0 ]]; then
+            echo "Нужно передать хотя бы один package dir для сборки" >&2
+            exit 64
+          fi
+          for package_dir in "${package_dirs[@]}"; do
+            echo "==> Building package/${package_dir}"
+            make "package/${package_dir}/compile" -j"$(nproc)" V=s
+          done
+
+      - name: Collect built feed artifacts
+        working-directory: ${{ runner.temp }}/openwrt-sdk
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/out/openwrt-feed"
+          find bin/packages -type f \( \
+            -name '*.apk' -o \
+            -name '*.ipk' -o \
+            -name 'packages.adb' -o \
+            -name 'Packages' -o \
+            -name 'Packages.gz' -o \
+            -name 'Packages.manifest' \
+          \) -exec cp {} "$GITHUB_WORKSPACE/out/openwrt-feed/" \;
+          find "$GITHUB_WORKSPACE/out/openwrt-feed" -maxdepth 1 -type f | sort
+
+      - name: Pack feed archive
+        id: pack_feed
+        run: |
+          archive="out/openwrt-passwall-feed-${{ github.event.inputs.openwrt_release }}-${{ github.event.inputs.target }}-${{ github.event.inputs.subtarget }}.tar.gz"
+          tar -C out -czf "$archive" openwrt-feed
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Upload feed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-passwall-feed-${{ github.event.inputs.openwrt_release }}-${{ github.event.inputs.target }}-${{ github.event.inputs.subtarget }}
+          path: |
+            out/openwrt-feed/
+            ${{ steps.pack_feed.outputs.archive }}
+          if-no-files-found: error
+
+      - name: Publish feed archive to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENWRT_RELEASE: ${{ github.event.inputs.openwrt_release }}
+          OPENWRT_TARGET: ${{ github.event.inputs.target }}
+          OPENWRT_SUBTARGET: ${{ github.event.inputs.subtarget }}
+        run: |
+          set -euo pipefail
+          tag="feed-${OPENWRT_RELEASE}-${OPENWRT_TARGET}-${OPENWRT_SUBTARGET}"
+          title="Feed ${OPENWRT_RELEASE}/${OPENWRT_TARGET}/${OPENWRT_SUBTARGET}"
+          notes="Release-aware feed archive for OpenWrt ${OPENWRT_RELEASE} (${OPENWRT_TARGET}/${OPENWRT_SUBTARGET})."
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$title" --notes "$notes"
+          gh release upload "$tag" "${{ steps.pack_feed.outputs.archive }}" --clobber
+
+      - name: Publish feed into gh-pages
+        if: ${{ github.event.inputs.publish_feed == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENWRT_RELEASE: ${{ github.event.inputs.openwrt_release }}
+          OPENWRT_TARGET: ${{ github.event.inputs.target }}
+          OPENWRT_SUBTARGET: ${{ github.event.inputs.subtarget }}
+          PUBLISH_ROOT: ${{ github.event.inputs.publish_root }}
+        run: |
+          set -euo pipefail
+          repo_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          publish_branch='gh-pages'
+          publish_repo="$RUNNER_TEMP/gh-pages"
+          publish_dir="$publish_repo/${PUBLISH_ROOT}/${OPENWRT_RELEASE}/${OPENWRT_TARGET}/${OPENWRT_SUBTARGET}"
+          feed_url="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/${PUBLISH_ROOT}/${OPENWRT_RELEASE}/${OPENWRT_TARGET}/${OPENWRT_SUBTARGET}/"
+
+          if git ls-remote --exit-code --heads "$repo_url" "$publish_branch" >/dev/null 2>&1; then
+            git clone --depth=1 --branch "$publish_branch" "$repo_url" "$publish_repo"
+          else
+            git clone --depth=1 "$repo_url" "$publish_repo"
+            cd "$publish_repo"
+            git checkout --orphan "$publish_branch"
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          mkdir -p "$publish_dir"
+          rsync -a --delete "$GITHUB_WORKSPACE/out/openwrt-feed/" "$publish_dir/"
+          touch "$publish_repo/.nojekyll"
+          jq -n \
+            --arg release "$OPENWRT_RELEASE" \
+            --arg target "$OPENWRT_TARGET" \
+            --arg subtarget "$OPENWRT_SUBTARGET" \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg url "$feed_url" \
+            '{release:$release,target:$target,subtarget:$subtarget,repository:$repo,url:$url}' \
+            > "$publish_dir/feed.json"
+
+          cd "$publish_repo"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .
+          if git diff --cached --quiet; then
+            echo "gh-pages publication: изменений нет"
+            exit 0
+          fi
+          git commit -m "Publish OpenWrt feed ${OPENWRT_RELEASE}/${OPENWRT_TARGET}/${OPENWRT_SUBTARGET}"
+          git push origin "$publish_branch"
+          echo "Feed published to ${feed_url}"
