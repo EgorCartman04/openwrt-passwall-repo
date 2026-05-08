@@ -1,0 +1,7 @@
+{
+  "release": "25.12.3",
+  "target": "mediatek",
+  "subtarget": "filogic",
+  "repository": "EgorCartman04/openwrt-passwall-repo",
+  "url": "https://EgorCartman04.github.io/openwrt-passwall-repo/feeds/passwall2/25.12.3/mediatek/filogic/"
+}
