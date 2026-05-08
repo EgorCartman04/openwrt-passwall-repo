@@ -158,7 +158,7 @@ jobs:
             echo "В out/openwrt-feed нет .apk файлов для индексации" >&2
             exit 66
           fi
-          "$apk_tool" mkndx --output "$GITHUB_WORKSPACE/out/openwrt-feed/packages.adb" "${apk_files[@]}"
+          "$apk_tool" --allow-untrusted mkndx --output "$GITHUB_WORKSPACE/out/openwrt-feed/packages.adb" "${apk_files[@]}"
           test -s "$GITHUB_WORKSPACE/out/openwrt-feed/packages.adb"
 
       - name: Validate feed artifacts
