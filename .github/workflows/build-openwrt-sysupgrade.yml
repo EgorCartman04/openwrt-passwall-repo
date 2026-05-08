@@ -1,0 +1,183 @@
+name: Build OpenWrt Sysupgrade Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_release:
+        description: Релиз OpenWrt
+        required: true
+        default: 25.12.3
+        type: string
+      target:
+        description: target OpenWrt
+        required: true
+        default: mediatek
+        type: string
+      subtarget:
+        description: subtarget OpenWrt
+        required: true
+        default: filogic
+        type: string
+      profile:
+        description: PROFILE из ImageBuilder; можно оставить пустым для auto-detect по board_name
+        required: false
+        default: ''
+        type: string
+      device_board_name:
+        description: board_name устройства для auto-detect PROFILE через официальный target index
+        required: true
+        default: glinet,gl-mt6000
+        type: string
+      package_list:
+        description: Список пакетов для image build через пробел или перевод строки
+        required: true
+        default: |
+          dnsmasq-full
+          xray-core
+        type: string
+      disabled_packages:
+        description: Список пакетов, которые нужно явно убрать, через пробел или перевод строки
+        required: false
+        default: |
+          dnsmasq
+        type: string
+      extra_repository_urls:
+        description: Дополнительные repository URL для ImageBuilder, по одному на строку
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: build-openwrt-sysupgrade-${{ github.ref_name }}-${{ github.event.inputs.openwrt_release }}
+  cancel-in-progress: false
+
+jobs:
+  build-sysupgrade-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ImageBuilder dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates zstd jq file
+
+      - name: Make helper scripts executable
+        run: chmod +x ./scripts/openwrt-resolve-artifact.sh ./scripts/openwrt-detect-profile.sh
+
+      - name: Resolve ImageBuilder download URL
+        id: resolve_imagebuilder
+        run: |
+          imagebuilder_url="$(./scripts/openwrt-resolve-artifact.sh \
+            "${{ github.event.inputs.openwrt_release }}" \
+            "${{ github.event.inputs.target }}" \
+            "${{ github.event.inputs.subtarget }}" \
+            imagebuilder)"
+          echo "imagebuilder_url=$imagebuilder_url" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve PROFILE for ImageBuilder
+        id: resolve_profile
+        run: |
+          if [[ -n "${{ github.event.inputs.profile }}" ]]; then
+            profile="${{ github.event.inputs.profile }}"
+          else
+            profile="$(./scripts/openwrt-detect-profile.sh \
+              "${{ github.event.inputs.openwrt_release }}" \
+              "${{ github.event.inputs.target }}" \
+              "${{ github.event.inputs.subtarget }}" \
+              "${{ github.event.inputs.device_board_name }}")"
+          fi
+          echo "profile=$profile" >> "$GITHUB_OUTPUT"
+
+      - name: Download and extract ImageBuilder
+        run: |
+          mkdir -p "$RUNNER_TEMP/openwrt-imagebuilder"
+          curl -fsSL "${{ steps.resolve_imagebuilder.outputs.imagebuilder_url }}" -o "$RUNNER_TEMP/openwrt-imagebuilder/imagebuilder.tar"
+          tar -xf "$RUNNER_TEMP/openwrt-imagebuilder/imagebuilder.tar" --strip-components=1 -C "$RUNNER_TEMP/openwrt-imagebuilder"
+
+      - name: Show available profiles
+        working-directory: ${{ runner.temp }}/openwrt-imagebuilder
+        run: |
+          make info
+          echo "Resolved PROFILE: ${{ steps.resolve_profile.outputs.profile }}"
+
+      - name: Append extra repository URLs when requested
+        working-directory: ${{ runner.temp }}/openwrt-imagebuilder
+        env:
+          EXTRA_REPOSITORY_URLS: ${{ github.event.inputs.extra_repository_urls }}
+        run: |
+          set -euo pipefail
+          [[ -n "$EXTRA_REPOSITORY_URLS" ]] || exit 0
+          repo_file=''
+          for candidate in repositories.conf repositories; do
+            if [[ -f "$candidate" ]]; then
+              repo_file="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$repo_file" ]]; then
+            echo "ImageBuilder не содержит ожидаемый файл repositories(.conf); нельзя безопасно добавить extra_repository_urls" >&2
+            exit 1
+          fi
+          printf '\n%s\n' "$EXTRA_REPOSITORY_URLS" >> "$repo_file"
+
+      - name: Build sysupgrade image
+        working-directory: ${{ runner.temp }}/openwrt-imagebuilder
+        env:
+          PROFILE: ${{ steps.resolve_profile.outputs.profile }}
+          PACKAGE_LIST: ${{ github.event.inputs.package_list }}
+          DISABLED_PACKAGES: ${{ github.event.inputs.disabled_packages }}
+        run: |
+          set -euo pipefail
+          packages="$(printf '%s\n' "$PACKAGE_LIST" | tr '\n' ' ' | xargs)"
+          disabled="$(printf '%s\n' "$DISABLED_PACKAGES" | tr '\n' ' ' | xargs)"
+          if [[ -n "$disabled" ]]; then
+            for pkg in $disabled; do
+              packages="$packages -$pkg"
+            done
+          fi
+          make image PROFILE="$PROFILE" PACKAGES="$packages"
+
+      - name: Collect sysupgrade artifacts
+        working-directory: ${{ runner.temp }}/openwrt-imagebuilder
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/out/sysupgrade"
+          find bin/targets -type f \( \
+            -name '*sysupgrade*.bin' -o \
+            -name '*manifest' -o \
+            -name '*sha256sums*' -o \
+            -name '*buildinfo' \
+          \) -exec cp {} "$GITHUB_WORKSPACE/out/sysupgrade/" \;
+          find "$GITHUB_WORKSPACE/out/sysupgrade" -maxdepth 1 -type f | sort
+
+      - name: Pack sysupgrade archive
+        id: pack_sysupgrade
+        run: |
+          archive="out/openwrt-sysupgrade-${{ github.event.inputs.openwrt_release }}-${{ steps.resolve_profile.outputs.profile }}.tar.gz"
+          tar -C out -czf "$archive" sysupgrade
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sysupgrade artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-sysupgrade-${{ github.event.inputs.openwrt_release }}-${{ steps.resolve_profile.outputs.profile }}
+          path: |
+            out/sysupgrade/
+            ${{ steps.pack_sysupgrade.outputs.archive }}
+          if-no-files-found: error
+
+      - name: Publish sysupgrade assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENWRT_RELEASE: ${{ github.event.inputs.openwrt_release }}
+          PROFILE: ${{ steps.resolve_profile.outputs.profile }}
+        run: |
+          set -euo pipefail
+          tag="sysupgrade-${OPENWRT_RELEASE}-${PROFILE}"
+          title="Sysupgrade ${OPENWRT_RELEASE}/${PROFILE}"
+          notes="Sysupgrade image bundle for OpenWrt ${OPENWRT_RELEASE} (${PROFILE})."
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$title" --notes "$notes"
+          gh release upload "$tag" out/sysupgrade/* "${{ steps.pack_sysupgrade.outputs.archive }}" --clobber
